@@ -1,11 +1,18 @@
 """
-Visualize one reconstruction: partial input, predicted full cloud, ground-truth full cloud.
+Visualize reconstruction(s): partial input, predicted full cloud, ground-truth full cloud.
 
-Example:
+Examples:
   python3 scripts/visualize_reconstruction.py \\
     --variant xyzfeat \\
     --checkpoint runs/run_xyzfeat_5ep/best_model.pt \\
     --out recon.png
+
+  # Multiple samples in one figure (rows x 3 columns):
+  python3 scripts/visualize_reconstruction.py \\
+    --variant xyzfeat \\
+    --checkpoint runs/run_xyzfeat_5ep/best_model.pt \\
+    --indices 0,1,2,3,4 \\
+    --out recon_multi.png
 """
 from __future__ import annotations
 
@@ -73,7 +80,12 @@ def main() -> None:
     p.add_argument("--variant", choices=["xyz", "xyzfeat"], default="xyzfeat")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--test_root", default="./data/chairs_processed/test")
-    p.add_argument("--index", type=int, default=0, help="Dataset index (0 .. len-1)")
+    p.add_argument("--index", type=int, default=0, help="Dataset index when --indices is not set")
+    p.add_argument(
+        "--indices",
+        default=None,
+        help="Comma-separated dataset indices for a multi-row figure (overrides --index). Example: 0,1,2,3,4",
+    )
     p.add_argument(
         "--partial_points",
         type=int,
@@ -93,23 +105,22 @@ def main() -> None:
     np.random.seed(args.seed)
 
     ds = PointCloudDataset(args.test_root)
-    if args.index < 0 or args.index >= len(ds):
-        raise SystemExit(f"index must be in [0, {len(ds) - 1}], got {args.index}")
 
-    sample = ds[args.index]
-    partial_xyz = sample["partial_xyz"].unsqueeze(0).to(args.device)
-    partial_feat = sample["partial_feat"].unsqueeze(0).to(args.device)
-    full_xyz = sample["full_xyz"].unsqueeze(0).to(args.device)
-
-    if args.variant == "xyz":
-        partial = partial_xyz
+    if args.indices is not None:
+        idx_list: list[int] = []
+        for part in args.indices.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            idx_list.append(int(part))
+        if not idx_list:
+            raise SystemExit("--indices must contain at least one integer")
     else:
-        partial = torch.cat([partial_xyz, partial_feat], dim=-1)
+        idx_list = [args.index]
 
-    if args.partial_points is not None:
-        partial = _subsample_partial(partial, args.partial_points)
-
-    part_vis = partial[0, :, :3].detach().cpu().numpy()
+    for idx in idx_list:
+        if idx < 0 or idx >= len(ds):
+            raise SystemExit(f"index must be in [0, {len(ds) - 1}], got {idx}")
 
     model = load_model(
         args.checkpoint,
@@ -121,23 +132,15 @@ def main() -> None:
         device=args.device,
     )
 
-    with torch.no_grad():
-        out = model(partial=partial, full_xyz=None)
-        pred = out.pred_full_xyz[0].cpu().numpy()
-    gt = full_xyz[0].cpu().numpy()
+    n_rows = len(idx_list)
+    fig = plt.figure(figsize=(14, max(4.0, 3.8 * n_rows)))
 
-    fig = plt.figure(figsize=(14, 4))
-    ax1 = fig.add_subplot(131, projection="3d")
-    ax2 = fig.add_subplot(132, projection="3d")
-    ax3 = fig.add_subplot(133, projection="3d")
-
-    def scatter(ax, pts, title, color):
+    def scatter(ax, pts, title, color, part_vis, pred, gt):
         ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=color, s=1, alpha=0.6)
         ax.set_title(title)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel("z")
-        # Shared scale for fair comparison
         lim = np.vstack([part_vis, pred, gt])
         c = lim.mean(axis=0)
         r = np.abs(lim - c).max() + 1e-6
@@ -145,9 +148,34 @@ def main() -> None:
         ax.set_ylim(c[1] - r, c[1] + r)
         ax.set_zlim(c[2] - r, c[2] + r)
 
-    scatter(ax1, part_vis, "Partial input (xyz)", "tab:blue")
-    scatter(ax2, pred, "Reconstructed", "tab:orange")
-    scatter(ax3, gt, "Ground truth", "tab:green")
+    for row, sample_idx in enumerate(idx_list):
+        sample = ds[sample_idx]
+        partial_xyz = sample["partial_xyz"].unsqueeze(0).to(args.device)
+        partial_feat = sample["partial_feat"].unsqueeze(0).to(args.device)
+        full_xyz = sample["full_xyz"].unsqueeze(0).to(args.device)
+
+        if args.variant == "xyz":
+            partial = partial_xyz
+        else:
+            partial = torch.cat([partial_xyz, partial_feat], dim=-1)
+
+        if args.partial_points is not None:
+            partial = _subsample_partial(partial, args.partial_points)
+
+        part_vis = partial[0, :, :3].detach().cpu().numpy()
+
+        with torch.no_grad():
+            out = model(partial=partial, full_xyz=None)
+            pred = out.pred_full_xyz[0].cpu().numpy()
+        gt = full_xyz[0].cpu().numpy()
+
+        label = f"[{sample_idx}] "
+        ax1 = fig.add_subplot(n_rows, 3, row * 3 + 1, projection="3d")
+        ax2 = fig.add_subplot(n_rows, 3, row * 3 + 2, projection="3d")
+        ax3 = fig.add_subplot(n_rows, 3, row * 3 + 3, projection="3d")
+        scatter(ax1, part_vis, label + "Partial input (xyz)", "tab:blue", part_vis, pred, gt)
+        scatter(ax2, pred, label + "Reconstructed", "tab:orange", part_vis, pred, gt)
+        scatter(ax3, gt, label + "Ground truth", "tab:green", part_vis, pred, gt)
 
     plt.tight_layout()
     out_path = Path(args.out)

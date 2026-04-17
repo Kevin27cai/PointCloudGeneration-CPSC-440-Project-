@@ -9,6 +9,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# Matplotlib cache (optional dev env)
+.mpl_cache/
+
 # OS / editor
 .DS_Store
 .idea/
